@@ -50,9 +50,6 @@ with mido.open_input(port_name) as inport:
             print(f"Note {msg.note} → {freq:.2f} Hz")
             play_note(freq)
 
-
-import mido
-
 # List all available input ports
 print("Available MIDI input ports:")
 for port in mido.get_input_names():
