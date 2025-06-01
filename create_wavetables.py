@@ -75,7 +75,7 @@ def oscillator(periods, resolution=4096):
     return output_signal
 
 
-def wavelet_synthesis(periods: int, detail_level: int, compress=False):
+def wavelet_synthesis(periods: int, detail_level: int, compress=True):
     signal = oscillator(periods)
     raw_synthesis = one_hot_reconstruction(signal, n=detail_level)
     single_synthesis_period = single_wave(raw_synthesis)

@@ -3,6 +3,7 @@ import mido
 def handle(msg):
     print("Received:", msg)
 
+
 # List available ports and pick the right one (based on what you saw in MIDI-OX)
 ports = mido.get_input_names()
 print(f"Available ports: {ports}")

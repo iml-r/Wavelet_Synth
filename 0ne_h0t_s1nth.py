@@ -3,9 +3,11 @@ from pyo import *
 import numpy as np
 import pandas as pd
 
+device_index = 1
+
 # Boot server with explicit MIDI device
 s = Server()
-s.setMidiInputDevice(2)
+s.setMidiInputDevice(device_index)
 s.boot()
 s.start()
 
@@ -140,11 +142,15 @@ lp_cutoff_pat.play()
 print("High-pass filter cutoff control defined")
 
 # --- 6. Note Event Handling ---
-notein = Notein(poly=16).out()
+notein = Notein(poly=16)
 pitch = notein['pitch']
 velocity = notein['velocity']
-note_on = notein['on']
-note_off = notein['off']
+note_on = notein['trigon']
+note_off = notein['trigoff']
+
+print(notein)
+print(f"note_on is: {note_on}")
+print(f"type(note_on): {type(note_on)}")
 
 # Convert pitch to freq and apply frequency envelope modulation
 base_freq = MToF(pitch)
@@ -195,7 +201,6 @@ def play_note():
         decay=decay_sig,
         sustain=sustain_sig,
         release=release_sig,
-        mul=0.3
     )
     current_env.play()
 
@@ -236,20 +241,7 @@ def note_off_event():
     if current_env is not None:
         current_env.stop()  # triggers release
 
-gate = notein['trigon']
-TrigFunc(gate, note_on_event)
-
-# Detect change in gate value
-gate_change = Change(gate)
-
-# Trigger when gate drops (i.e., note-off)
-noteoff_trig = Compare(gate_change, "<", 0)
-
-def note_off_callback():
-    print("Note off detected")
-
-TrigFunc(noteoff_trig, note_off_callback)
-
+TrigFunc(note_on, note_on_event)
 TrigFunc(note_off, note_off_event)
 print("Trig_func defined")
 
