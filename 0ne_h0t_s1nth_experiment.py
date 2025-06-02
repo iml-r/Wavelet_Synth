@@ -76,12 +76,12 @@ class Voice:
     def __init__(self, freq, velocity, tbl, adsr_params, lp_cutoff, resonance):
         a, d, s, r = adsr_params
         self.env = Adsr(attack=a, decay=d, sustain=s, release=r)
-        #self.env = make_linseg_env(a, d, s, r)
         self.env.play()
         self.osc = Osc(table=tbl, freq=freq, mul=self.env)
         self.res_sig = SigTo(value=resonance, time=0.05)
         self.cutoff_sig = SigTo(value=lp_cutoff, time=0.05)
         self.filter = MoogLP(self.osc, freq=self.cutoff_sig, res=self.res_sig).out()
+        self.is_finished = False # New flag to indicate full completion
 
     def stop(self):
         # Trigger the envelope release phase
@@ -89,15 +89,19 @@ class Voice:
         self.env.stop()
 
         # Schedule cleanup after release time + small buffer
-        release_time = self.env.release  # This is a float
-        self.cleanup_pattern = CallAfter(self.cleanup, time=release_time + 0.05)
+        # This CallAfter will trigger the cleanup of pyo objects and then mark the voice as finished.
+        release_time = self.env.release
+        self.cleanup_pattern = CallAfter(self._mark_as_finished, time=release_time + 0.05)
         self.cleanup_pattern.play()
 
-    def cleanup(self):
-        # Stop the oscillator and free resources after envelope finishes releasing
-        print("Cleaning up voice: stopping osc and filter")
+    def _mark_as_finished(self):
+        # Stop the pyo objects and free resources
+        print("Cleaning up pyo objects for voice: stopping osc and filter")
         self.osc.stop()
-        self.cleanup_pattern.stop()
+        self.filter.stop()
+        if hasattr(self, 'cleanup_pattern'):
+            self.cleanup_pattern.stop()
+        self.is_finished = True # Mark this voice as completely done
 
     def update_wavetable(self, new_tbl):
         self.osc.setTable(new_tbl)
@@ -112,28 +116,62 @@ class Voice:
 class VoiceManager:
     def __init__(self, max_voices=8):
         self.voices = {}
+        self.releasing_voices = [] # List to hold voices in their release phase
         self.max_voices = max_voices
 
+        # Periodically clean up finished voices
+        self.cleanup_pattern = Pattern(self._clean_finished_voices, time=0.1) # Check every 100ms
+        self.cleanup_pattern.play()
+
+
+    def _clean_finished_voices(self):
+        # Filter out voices that have finished their release phase and are marked as 'is_finished'
+        self.releasing_voices = [v for v in self.releasing_voices if not v.is_finished]
+        # print(f"Active voices: {len(self.voices)}, Releasing voices: {len(self.releasing_voices)}")
+
+
     def note_on(self, note, voice):
-        if len(self.voices) >= self.max_voices:
-            oldest = list(self.voices.keys())[0]
-            self.voices[oldest].stop()
-            del self.voices[oldest]
+        # Ensure cleanup runs before potentially stealing voices
+        self._clean_finished_voices()
+
+        if len(self.voices) + len(self.releasing_voices) >= self.max_voices:
+            # Voice stealing:
+            # 1. Prefer to steal from voices that are still playing (not yet in release)
+            if self.voices:
+                # Find the oldest playing voice (lowest note number, or simply the first in dict if ordered)
+                # For simplicity, let's just pop the first one added if max_voices is hit
+                oldest_note = next(iter(self.voices))
+                oldest_voice = self.voices.pop(oldest_note)
+                print(f"Stealing voice for note {oldest_note}")
+                oldest_voice.stop() # Trigger its release
+                self.releasing_voices.append(oldest_voice)
+            # 2. If no playing voices, then force cleanup on an oldest releasing voice
+            elif self.releasing_voices:
+                oldest_releasing_voice = self.releasing_voices.pop(0) # Pop from the beginning (oldest)
+                print(f"Forcing cleanup on releasing voice")
+                oldest_releasing_voice._mark_as_finished() # Force its immediate cleanup
+
         self.voices[note] = voice
 
     def note_off(self, note):
         if note in self.voices:
-            self.voices[note].stop()
-            del self.voices[note]
+            voice_to_release = self.voices.pop(note) # Remove from active voices
+            voice_to_release.stop() # Trigger its release phase
+            self.releasing_voices.append(voice_to_release) # Add to the list of releasing voices
 
     def update_all_filters(self, cutoff, resonance):
         for voice in self.voices.values():
+            voice.update_filter(cutoff=cutoff, resonance=resonance)
+        for voice in self.releasing_voices:
             voice.update_filter(cutoff=cutoff, resonance=resonance)
 
     def update_all_tables(self, new_tbl):
         for voice in self.voices.values():
             voice.update_wavetable(new_tbl)
+        for voice in self.releasing_voices:
+            voice.update_wavetable(new_tbl)
 
+# (Rest of the code remains the same)
 # =======================
 # Main Synth Class
 # =======================
@@ -148,8 +186,8 @@ class WavetableSynth:
 
         # Instead of Pyo's Midictl objects we maintain our own control variables.
         # These will be updated via Mido.
-        self.one_hot_val = 0            # For CC 19 (wavetable selection, 0-3)
-        self.base_period_val = 0         # For CC 20 (wavetable bank selection, up to 98)
+        self.one_hot_val = 0         # For CC 19 (wavetable selection, 0-3)
+        self.base_period_val = 0     # For CC 20 (wavetable bank selection, up to 98)
 
         # ADSR values (from MIDI controls)
         self.attack_val = 0.01   # CC 73
@@ -187,7 +225,12 @@ class WavetableSynth:
 
         # Resonance control (CC 71)
         self.res_val = 0.5
-        self.res_sig = SigTo(value=self.res_val, time=0.05)
+        # The SigTo objects should be updated when the CC value changes,
+        # and then their *output* values are what's used by the voice manager
+        self.res_sig = SigTo(value=self.res_val, time=0.05) # Keep this
+
+        self.filter_params_pattern = Pattern(self.update_filter_params_in_voices, time=0.05)
+        self.filter_params_pattern.play()
 
         # Octave shift (CC 14)
         self.octave_shift = 0  # -2 to +2
@@ -202,20 +245,23 @@ class WavetableSynth:
         self.res_sig.value = self.res_val
         self.voice_manager.update_all_filters(self.lp_cutoff_val, self.res_val)
 
+    def update_filter_params_in_voices(self):
+        # We pass the *raw* values here. The Voice's SigTo objects will handle smoothing.
+        self.voice_manager.update_all_filters(self.lp_cutoff_val, self.res_val)
+
+    # Renamed from update_lp_cutoff to reflect it's not just cutoff
     def update_adsr_params(self):
-        self.attack_sig.value = self.attack_val
-        self.decay_sig.value = self.decay_val
-        self.sustain_sig.value = self.sustain_val
-        self.release_sig.value = self.release_val
+        # These are now updated directly in update_midi_cc
+        pass # No need to do anything here if SigTo values are updated in update_midi_cc
 
     def update_lp_cutoff(self):
         self.lp_cutoff_sig.value = self.lp_cutoff_val
         if self.current_lp_filter is not None:
             self.current_lp_filter.freq = self.lp_cutoff_sig.value
 
-    def update_resonance(self, new_value):
-        # Assume new_value is between 0.0 and 1.0
-        self.res_sig.value = new_value
+    # def update_resonance(self, new_value):
+    #     # Assume new_value is between 0.0 and 1.0
+    #     self.res_sig.value = new_value
 
     def play_note(self, note, velocity):
         freq_val = MToF(Sig(note + self.octave_shift * 12))
@@ -238,36 +284,44 @@ class WavetableSynth:
         self.voice_manager.note_off(note)
 
     def update_midi_cc(self, control, value):
-
-        # Update internal state based on control change.
-        # The values from MIDI (0-127) are normalized to our desired range.
-        if control == 19:  # Wavetable selection.
+        if control == 19:
+            old_one_hot_val = self.one_hot_val
             self.one_hot_val = int(round((value / 127) * 3))
-        elif control == 20:  # Bank selection.
-            # We assume the bank index goes from 0 to (length-1)
+            if self.one_hot_val != old_one_hot_val:
+                self._update_wavetable_all_voices()
+        elif control == 20:
+            old_base_period_val = self.base_period_val
             self.base_period_val = int(round((value / 127) * (len(self.table_bank[0]) - 1)))
-        elif control == 14:  # Octave shift (0–5 mapped to -2 to +2)
+            if self.base_period_val != old_base_period_val:
+                self._update_wavetable_all_voices()
+        elif control == 14:  # Octave shift
             self.octave_shift = int(value) - 2
         elif control == 71:  # Resonance
-            new_res = value / 127
-            self.update_resonance(new_res)
+            self.res_val = value / 127 # Update the raw value
+            self.res_sig.value = self.res_val # Update the SigTo directly here
         elif control == 73:  # Attack
             self.attack_val = (value / 127) * (2 - 0.001) + 0.001
+            self.attack_sig.value = self.attack_val # Update SigTo
         elif control == 75:  # Decay
             self.decay_val = (value / 127) * (2 - 0.001) + 0.001
+            self.decay_sig.value = self.decay_val # Update SigTo
         elif control == 30:  # Sustain
             self.sustain_val = value / 127
+            self.sustain_sig.value = self.sustain_val # Update SigTo
         elif control == 72:  # Release
             self.release_val = max((value / 127) * (3 - 0.001) + 0.001, 0.02)
+            self.release_sig.value = self.release_val # Update SigTo
         elif control == 74:  # Low-pass cutoff
             self.lp_cutoff_val = (value / 127) * (12000 - 20) + 20
+            self.lp_cutoff_sig.value = self.lp_cutoff_val # Update SigTo
         print(f"Updated CC {control} with raw value {value}.")
 
     def _update_wavetable_all_voices(self):
         oh_idx = safe_index(self.one_hot_val, 0, len(self.table_bank) - 1)
         bp_idx = safe_index(self.base_period_val, 0, len(self.table_bank[0]) - 1)
+        # This is where the *new* table is selected based on updated CC values
         tbl = self.table_bank[oh_idx][bp_idx]
-        self.voice_manager.update_all_tables(tbl)
+        self.voice_manager.update_all_tables(tbl)  # This sends the new table to all active Voice objects
 
 # =======================
 # Mido MIDI Listener Thread
