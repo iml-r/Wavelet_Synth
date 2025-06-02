@@ -239,6 +239,11 @@ class WavetableSynth:
         self.lp_cutoff_pattern = Pattern(self.update_filter_params, time=0.05)
         self.lp_cutoff_pattern.play()
 
+        tbl = wavetables["sin"]["haar"][0][0]  # Just to start with something
+        self.viewed_table = DataTable(size=tbl.getSize())
+        self.viewed_table.replace(tbl.getTable())  # Fill with actual data
+        self.viewed_table.view()
+
 
     def update_filter_params(self):
         self.lp_cutoff_sig.value = self.lp_cutoff_val
@@ -323,6 +328,9 @@ class WavetableSynth:
         tbl = self.table_bank[oh_idx][bp_idx]
         self.voice_manager.update_all_tables(tbl)  # This sends the new table to all active Voice objects
 
+        self.viewed_table.replace(tbl.getTable())
+
+
 # =======================
 # Mido MIDI Listener Thread
 # =======================
@@ -365,8 +373,26 @@ def main():
     t = threading.Thread(target=midi_listener, args=(synth, midi_port), daemon=True)
     t.start()
 
+    # Set recording options
+    # filename: The name of the output WAV file.
+    # fileformat: The file format (0=WAV, 1=AIFF, 2=FLAC).
+    # sampletype: The sample type (0=int16, 1=int24, 2=int32, 3=float32).
+    # channels: Number of channels to record. Default is server's nchnls.
+    # quality: Quality of the conversion (relevant for lossy formats like FLAC).
+    # dur: Duration of the recording in seconds. If 0, it records until stopped.
+    server.recordOptions(filename=os.path.join(output_dir, "0ne_h0t_s1nth_BASS.wav"),
+                    fileformat=0,
+                    sampletype=1)  # int24 is a good balance for quality and file size
+
     # Start the Pyo GUI (blocking call).
     server.gui(locals())
+
+output_dir = "./recordings"
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+
+
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from wavetable_preprocessing import process_waveform, remove_dc, normalize, match_endpoints, match_slopes
 
+good_mother_wavelets = ["haar", "db17"]
 
 def dirty_plot(a: np.ndarray):
     plt.plot([*range(len(a))], a)
@@ -98,7 +99,7 @@ print(find_period_index(sine_wave))
 dirty_plot(single_wave(one_hot_reconstruction(sine_wave, n=0)))
 
 wavelets = pywt.wavedec(sine_wave,
-                        wavelet='haar',
+                        wavelet='db17',
                         level=4,
                         mode='periodization')
 
